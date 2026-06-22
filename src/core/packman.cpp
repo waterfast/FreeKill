@@ -9,6 +9,17 @@
 
 PackMan *Pacman = nullptr;
 
+static QString normalizedRepoUrl(QString url) {
+  url = url.trimmed();
+  while (url.endsWith('/')) {
+    url.chop(1);
+  }
+  if (url.endsWith(".git", Qt::CaseInsensitive)) {
+    url.chop(4);
+  }
+  return url;
+}
+
 PackMan::PackMan(QObject *parent) : QObject(parent) {
   git_libgit2_init();
   db = std::make_unique<Sqlite3>("./packages/packages.db", "./packages/init.sql");
@@ -69,9 +80,9 @@ void PackMan::loadSummary(const QString &jsonData, bool useThread) {
       Backend->notifyUI("SetDownloadingPackage", name);
 #endif
 
-      if (db->select(
-              QString("SELECT name FROM packages WHERE name='%1';").arg(name))
-              .isEmpty()) {
+      auto localPackages = db->select(
+        QString("SELECT url FROM packages WHERE name='%1';").arg(name));
+      if (localPackages.isEmpty()) {
         err = downloadNewPack(url);
         if (err != 0) {
 #ifndef FK_SERVER_ONLY
@@ -86,6 +97,31 @@ void PackMan::loadSummary(const QString &jsonData, bool useThread) {
 #endif
           continue;
         }
+      } else if (normalizedRepoUrl(localPackages[0]["url"]) !=
+                 normalizedRepoUrl(url)) {
+        // A server may move a package (for example, from Gitee to GitHub)
+        // without changing its directory name. Keep the existing checkout and
+        // point its origin at the authoritative URL before fetching updates.
+        err = status(name);
+        if (err == 0) {
+          err = setRemoteUrl(name, url);
+        }
+        if (err != 0) {
+#ifndef FK_SERVER_ONLY
+          QString msg;
+          if (err != 100) {
+            auto error = git_error_last();
+            msg = QString("Error: %1").arg(error->message);
+          } else {
+            msg = "Workspace is dirty.";
+          }
+          Backend->notifyUI("PackageDownloadError", msg);
+#endif
+          continue;
+        }
+        db->exec(QString("UPDATE packages SET url='%1' WHERE name='%2'")
+                   .arg(url)
+                   .arg(name));
       }
 
       enablePack(name);
@@ -376,6 +412,22 @@ static int transfer_progress_cb(const git_indexer_progress *stats,
   }
 
   return 0;
+}
+
+int PackMan::setRemoteUrl(const QString &name, const QString &url) {
+  git_repository *repo = NULL;
+  int err;
+  auto path = QString("packages/%1").arg(name).toUtf8();
+
+  err = git_repository_open(&repo, path);
+  GIT_CHK_CLEAN;
+
+  err = git_remote_set_url(repo, "origin", url.toUtf8());
+  GIT_CHK_CLEAN;
+
+clean:
+  git_repository_free(repo);
+  return err;
 }
 
 int PackMan::clone(const QString &u) {
