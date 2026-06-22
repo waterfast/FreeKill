@@ -36,6 +36,7 @@ private:
   std::unique_ptr<Sqlite3> db;
 
   int clone(const QString &url);
+  int setRemoteUrl(const QString &name, const QString &url);
   int pull(const QString &name);
   int hasCommit(const QString &name, const QString &hash);
   int checkout(const QString &name, const QString &hash);
